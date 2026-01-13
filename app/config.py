@@ -82,6 +82,9 @@ class SearchSettings(BaseModel):
         default="us",
         description="Country code for search results (e.g., us, cn, uk)",
     )
+    ali_api_key: Optional[str] = Field(None, description="Alibaba Cloud UnifiedSearch AccessKey ID")
+    ali_api_secret: Optional[str] = Field(None, description="Alibaba Cloud UnifiedSearch AccessKey Secret")
+    ali_endpoint: str = Field("iqs.cn-zhangjiakou.aliyuncs.com", description="Alibaba Cloud UnifiedSearch Endpoint")
 
 
 class RunflowSettings(BaseModel):

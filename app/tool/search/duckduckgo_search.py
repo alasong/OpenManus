@@ -14,7 +14,19 @@ class DuckDuckGoSearchEngine(WebSearchEngine):
 
         Returns results formatted according to SearchItem model.
         """
-        raw_results = DDGS().text(query, max_results=num_results)
+        lang = kwargs.get("lang")
+        country = kwargs.get("country")
+        region = None
+        try:
+            if lang and country:
+                region = f"{country}-{lang}"
+        except Exception:
+            region = None
+
+        if region is None:
+            region = "us-en"
+
+        raw_results = DDGS().text(query, max_results=num_results, region=region)
 
         results = []
         for i, item in enumerate(raw_results):

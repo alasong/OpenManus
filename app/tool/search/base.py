@@ -8,9 +8,11 @@ class SearchItem(BaseModel):
 
     title: str = Field(description="The title of the search result")
     url: str = Field(description="The URL of the search result")
+    snippet: str = Field(default="", description="Snippet or summary of the result")
     description: Optional[str] = Field(
         default=None, description="A description or snippet of the search result"
     )
+    extra: Optional[dict] = Field(default=None, description="Extra information")
 
     def __str__(self) -> str:
         """String representation of a search result item."""

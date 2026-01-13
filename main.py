@@ -17,19 +17,33 @@ async def main():
     # Create and initialize Manus agent
     agent = await Manus.create()
     try:
-        # Use command line prompt if provided, otherwise ask for input
-        prompt = args.prompt if args.prompt else input("Enter your prompt: ")
-        if not prompt.strip():
-            logger.warning("Empty prompt provided.")
-            return
+        while True:
+            # Use command line prompt if provided, otherwise ask for input
+            if args.prompt:
+                prompt = args.prompt
+                args.prompt = None # Only use it once
+            else:
+                try:
+                    prompt = input("\nEnter your prompt (or 'exit' to quit): ")
+                except EOFError:
+                    break
 
-        # Purify user input
-        anti_contamination = AntiContamination()
-        prompt = await anti_contamination.purify(prompt)
+            if prompt.lower() in ['exit', 'quit']:
+                logger.info("Goodbye!")
+                break
+            
+            if not prompt.strip():
+                logger.warning("Empty prompt provided.")
+                continue
 
-        logger.warning("Processing your request...")
-        await agent.run(prompt)
-        logger.info("Request processing completed.")
+            # Purify user input
+            anti_contamination = AntiContamination()
+            prompt = await anti_contamination.purify(prompt, history=agent.memory.messages)
+
+            logger.warning("Processing your request...")
+            await agent.run(prompt)
+            logger.info("Request processing completed.")
+            
     except KeyboardInterrupt:
         logger.warning("Operation interrupted.")
     finally:

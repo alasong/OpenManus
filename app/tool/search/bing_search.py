@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 
 from app.logger import logger
 from app.tool.search.base import SearchItem, WebSearchEngine
+from app.config import config
 
 
 ABSTRACT_MAX_LENGTH = 300
@@ -43,6 +44,12 @@ class BingSearchEngine(WebSearchEngine):
         super().__init__(**data)
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
+        try:
+            if getattr(config, "browser_config", None) and getattr(config.browser_config, "proxy", None) and getattr(config.browser_config.proxy, "server", None):
+                server = config.browser_config.proxy.server
+                self.session.proxies.update({"http": server, "https": server})
+        except Exception:
+            pass
 
     def _search_sync(self, query: str, num_results: int = 10) -> List[SearchItem]:
         """

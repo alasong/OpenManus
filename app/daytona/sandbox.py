@@ -15,39 +15,52 @@ from app.utils.logger import logger
 
 
 # load_dotenv()
-daytona_settings = config.daytona
-logger.debug("Initializing Daytona sandbox configuration")
-daytona_config = DaytonaConfig(
-    api_key=daytona_settings.daytona_api_key,
-    server_url=daytona_settings.daytona_server_url,
-    target=daytona_settings.daytona_target,
-)
+_daytona_client = None
+_daytona_initialized = False
 
-if daytona_config.api_key:
-    logger.info("Daytona API key configured successfully")
-else:
-    logger.debug("No Daytona API key found in environment variables")
+def get_daytona_client():
+    global _daytona_client, _daytona_initialized
+    if _daytona_initialized:
+        return _daytona_client
 
-if daytona_config.server_url:
-    logger.debug(f"Daytona server URL set to: {daytona_config.server_url}")
+    daytona_settings = config.daytona
+    logger.debug("Initializing Daytona sandbox configuration")
+    daytona_config = DaytonaConfig(
+        api_key=daytona_settings.daytona_api_key,
+        server_url=daytona_settings.daytona_server_url,
+        target=daytona_settings.daytona_target,
+    )
 
-if daytona_config.target:
-    logger.debug(f"Daytona target set to: {daytona_config.target}")
-
-try:
     if daytona_config.api_key:
-        daytona = Daytona(daytona_config)
-        logger.info("Daytona client initialized")
+        logger.info("Daytona API key configured successfully")
     else:
-        daytona = None
-        logger.debug("Daytona client not initialized (no API key)")
-except Exception as e:
-    daytona = None
-    logger.warning(f"Failed to initialize Daytona client: {e}")
+        # Changed to DEBUG to avoid user confusion when not using Daytona
+        logger.debug("No Daytona API key found in environment variables")
+
+    if daytona_config.server_url:
+        logger.debug(f"Daytona server URL set to: {daytona_config.server_url}")
+
+    if daytona_config.target:
+        logger.debug(f"Daytona target set to: {daytona_config.target}")
+
+    try:
+        if daytona_config.api_key:
+            _daytona_client = Daytona(daytona_config)
+            logger.info("Daytona client initialized")
+        else:
+            _daytona_client = None
+            logger.debug("Daytona client not initialized (no API key)")
+    except Exception as e:
+        _daytona_client = None
+        logger.warning(f"Failed to initialize Daytona client: {e}")
+    
+    _daytona_initialized = True
+    return _daytona_client
 
 
 async def get_or_start_sandbox(sandbox_id: str):
     """Retrieve a sandbox by ID, check its state, and start it if needed."""
+    daytona = get_daytona_client()
     
     if not daytona:
          raise ValueError("Daytona client is not initialized")

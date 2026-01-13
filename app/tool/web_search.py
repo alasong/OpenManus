@@ -10,6 +10,7 @@ from app.config import config
 from app.logger import logger
 from app.tool.base import BaseTool, ToolResult
 from app.tool.search import (
+    AliUnifiedSearchEngine,
     BaiduSearchEngine,
     BingSearchEngine,
     DuckDuckGoSearchEngine,
@@ -118,14 +119,26 @@ class WebContentFetcher:
         Returns:
             Extracted text content or None if fetching fails
         """
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        ]
+        lang = getattr(getattr(config, "search_config", None), "lang", "en") or "en"
         headers = {
-            "WebSearch": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": user_agents[0],
+            "Accept-Language": "zh-CN,zh;q=0.9" if lang.startswith("zh") else "en-US,en;q=0.9",
         }
 
         try:
             # Use asyncio to run requests in a thread pool
+            proxies = None
+            if getattr(config, "browser_config", None) and getattr(config.browser_config, "proxy", None) and getattr(config.browser_config.proxy, "server", None):
+                server = config.browser_config.proxy.server
+                proxies = {"http": server, "https": server}
             response = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: requests.get(url, headers=headers, timeout=timeout)
+                None,
+                lambda: requests.get(url, headers=headers, timeout=timeout, proxies=proxies),
             )
 
             if response.status_code != 200:
@@ -169,8 +182,8 @@ class WebSearch(BaseTool):
             },
             "num_results": {
                 "type": "integer",
-                "description": "(optional) The number of search results to return. Default is 5.",
-                "default": 5,
+                "description": "(optional) The number of search results to return. Default is 20.",
+                "default": 20,
             },
             "lang": {
                 "type": "string",
@@ -191,10 +204,7 @@ class WebSearch(BaseTool):
         "required": ["query"],
     }
     _search_engine: dict[str, WebSearchEngine] = {
-        "google": GoogleSearchEngine(),
-        "baidu": BaiduSearchEngine(),
-        "duckduckgo": DuckDuckGoSearchEngine(),
-        "bing": BingSearchEngine(),
+        "ali_unified_search": AliUnifiedSearchEngine(),
     }
     content_fetcher: WebContentFetcher = WebContentFetcher()
 
@@ -246,11 +256,18 @@ class WebSearch(BaseTool):
                 else "us"
             )
 
-        search_params = {"lang": lang, "country": country}
+        if any("\u4e00" <= ch <= "\u9fff" for ch in query):
+            lang = "zh"
+            country = "cn"
+
+        if lang is None or country is None:
+            pass
+
+        search_params = {"lang": lang, "country": country, "query": query}
 
         # Try searching with retries when all engines fail
         for retry_count in range(max_retries + 1):
-            results = await self._try_all_engines(query, num_results, search_params)
+            results = await self._aggregate_all_engines(query, num_results, search_params)
 
             if results:
                 # Fetch content if requested
@@ -287,44 +304,44 @@ class WebSearch(BaseTool):
             results=[],
         )
 
-    async def _try_all_engines(
+    async def _aggregate_all_engines(
         self, query: str, num_results: int, search_params: Dict[str, Any]
     ) -> List[SearchResult]:
-        """Try all search engines in the configured order."""
-        engine_order = self._get_engine_order()
-        failed_engines = []
-
+        engine_order = self._get_engine_order(query, search_params.get("lang"), search_params.get("country"))
+        tasks = []
         for engine_name in engine_order:
             engine = self._search_engine[engine_name]
-            logger.info(f"🔎 Attempting search with {engine_name.capitalize()}...")
-            search_items = await self._perform_search_with_engine(
-                engine, query, num_results, search_params
+            tasks.append(
+                self._perform_search_with_engine(engine, query, num_results, search_params)
             )
-
-            if not search_items:
+        engine_results = await asyncio.gather(*tasks, return_exceptions=True)
+        collected: List[SearchResult] = []
+        for idx, items in enumerate(engine_results):
+            if isinstance(items, Exception) or not items:
                 continue
+            engine_name = engine_order[idx]
+            for i, item in enumerate(items):
+                # Check for content in extra (e.g. from AliUnifiedSearch)
+                raw_content = None
+                if item.extra and "markdown_text" in item.extra:
+                    raw_content = item.extra["markdown_text"]
+                elif item.extra and "main_text" in item.extra:
+                    raw_content = item.extra["main_text"]
 
-            if failed_engines:
-                logger.info(
-                    f"Search successful with {engine_name.capitalize()} after trying: {', '.join(failed_engines)}"
+                collected.append(
+                    SearchResult(
+                        position=i + 1,
+                        url=item.url,
+                        title=item.title or f"Result {i+1}",
+                        description=item.description or item.snippet or "",
+                        source=engine_name,
+                        raw_content=raw_content,
+                    )
                 )
-
-            # Transform search items into structured results
-            return [
-                SearchResult(
-                    position=i + 1,
-                    url=item.url,
-                    title=item.title
-                    or f"Result {i+1}",  # Ensure we always have a title
-                    description=item.description or "",
-                    source=engine_name,
-                )
-                for i, item in enumerate(search_items)
-            ]
-
-        if failed_engines:
-            logger.error(f"All search engines failed: {', '.join(failed_engines)}")
-        return []
+        if not collected:
+            return []
+        merged = self._dedup_and_rank(collected, engine_order)
+        return merged[:num_results]
 
     async def _fetch_content_for_results(
         self, results: List[SearchResult]
@@ -351,14 +368,17 @@ class WebSearch(BaseTool):
 
     async def _fetch_single_result_content(self, result: SearchResult) -> SearchResult:
         """Fetch content for a single search result."""
+        # If we already have content (e.g. from AliUnifiedSearch), don't overwrite it
+        if result.raw_content:
+            return result
+            
         if result.url:
             content = await self.content_fetcher.fetch_content(result.url)
             if content:
                 result.raw_content = content
         return result
 
-    def _get_engine_order(self) -> List[str]:
-        """Determines the order in which to try search engines."""
+    def _get_engine_order(self, query: str, lang: Optional[str], country: Optional[str]) -> List[str]:
         preferred = (
             getattr(config.search_config, "engine", "google").lower()
             if config.search_config
@@ -382,7 +402,33 @@ class WebSearch(BaseTool):
         )
         engine_order.extend([e for e in self._search_engine if e not in engine_order])
 
+        if any("\u4e00" <= ch <= "\u9fff" for ch in query):
+            engine_order = [e for e in ["ali_unified_search", "baidu", "bing", "duckduckgo", "google"] if e in self._search_engine]
+
         return engine_order
+
+    def _normalize_url(self, url: str) -> str:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".lower()
+        except Exception:
+            return url.lower()
+
+    def _dedup_and_rank(self, results: List[SearchResult], engine_order: List[str]) -> List[SearchResult]:
+        seen = set()
+        ranked = []
+        weight = {name: i for i, name in enumerate(engine_order)}
+        for res in results:
+            key = self._normalize_url(res.url)
+            if key in seen:
+                continue
+            seen.add(key)
+            ranked.append(res)
+        ranked.sort(key=lambda r: (weight.get(r.source, len(engine_order)), r.position))
+        for i, r in enumerate(ranked, 1):
+            r.position = i
+        return ranked
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10)
