@@ -79,14 +79,14 @@ class ToolCallAgent(ReActAgent):
 
         # Log response info
         logger.info(f"✨ {self.name}'s thoughts: {content}")
-        logger.info(
+        logger.debug(
             f"🛠️ {self.name} selected {len(tool_calls) if tool_calls else 0} tools to use"
         )
         if tool_calls:
-            logger.info(
+            logger.debug(
                 f"🧰 Tools being prepared: {[call.function.name for call in tool_calls]}"
             )
-            logger.info(f"🔧 Tool arguments: {tool_calls[0].function.arguments}")
+            logger.debug(f"🔧 Tool arguments: {tool_calls[0].function.arguments}")
 
         try:
             if response is None:
@@ -137,17 +137,30 @@ class ToolCallAgent(ReActAgent):
             # Return last message content if no tool calls
             return self.messages[-1].content or "No content or commands to execute"
 
-        results = []
-        for command in self.tool_calls:
-            # Reset base64_image for each tool call
-            self._current_base64_image = None
+        # Create tasks for parallel execution
+        tasks = [self.execute_tool(command) for command in self.tool_calls]
+        
+        # Execute all tools in parallel
+        # return_exceptions=True allows other tools to complete even if one fails
+        results_with_images = await asyncio.gather(*tasks, return_exceptions=True)
 
-            result = await self.execute_tool(command)
+        results = []
+        for i, result_pair in enumerate(results_with_images):
+            command = self.tool_calls[i]
+            
+            # Handle exceptions from asyncio.gather
+            if isinstance(result_pair, Exception):
+                error_msg = f"Error executing tool '{command.function.name}': {str(result_pair)}"
+                logger.error(error_msg)
+                result = error_msg
+                base64_image = None
+            else:
+                result, base64_image = result_pair
 
             if self.max_observe:
                 result = result[: self.max_observe]
 
-            logger.info(
+            logger.debug(
                 f"🎯 Tool '{command.function.name}' completed its mission! Result: {result}"
             )
 
@@ -156,37 +169,37 @@ class ToolCallAgent(ReActAgent):
                 content=result,
                 tool_call_id=command.id,
                 name=command.function.name,
-                base64_image=self._current_base64_image,
+                base64_image=base64_image,
             )
             self.memory.add_message(tool_msg)
             results.append(result)
 
         return "\n\n".join(results)
 
-    async def execute_tool(self, command: ToolCall) -> str:
+    async def execute_tool(self, command: ToolCall) -> tuple[str, Optional[str]]:
         """Execute a single tool call with robust error handling"""
         if not command or not command.function or not command.function.name:
-            return "Error: Invalid command format"
+            return "Error: Invalid command format", None
 
         name = command.function.name
         if name not in self.available_tools.tool_map:
-            return f"Error: Unknown tool '{name}'"
+            return f"Error: Unknown tool '{name}'", None
 
         try:
             # Parse arguments
             args = json.loads(command.function.arguments or "{}")
 
             # Execute the tool
-            logger.info(f"🔧 Activating tool: '{name}'...")
+            logger.debug(f"🔧 Activating tool: '{name}'...")
             result = await self.available_tools.execute(name=name, tool_input=args)
 
             # Handle special tools
             await self._handle_special_tool(name=name, result=result)
 
+            base64_image = None
             # Check if result is a ToolResult with base64_image
             if hasattr(result, "base64_image") and result.base64_image:
-                # Store the base64_image for later use in tool_message
-                self._current_base64_image = result.base64_image
+                base64_image = result.base64_image
 
             # Format result for display (standard case)
             observation = (
@@ -195,17 +208,17 @@ class ToolCallAgent(ReActAgent):
                 else f"Cmd `{name}` completed with no output"
             )
 
-            return observation
+            return observation, base64_image
         except json.JSONDecodeError:
             error_msg = f"Error parsing arguments for {name}: Invalid JSON format"
             logger.error(
                 f"📝 Oops! The arguments for '{name}' don't make sense - invalid JSON, arguments:{command.function.arguments}"
             )
-            return f"Error: {error_msg}"
+            return f"Error: {error_msg}", None
         except Exception as e:
             error_msg = f"⚠️ Tool '{name}' encountered a problem: {str(e)}"
             logger.exception(error_msg)
-            return f"Error: {error_msg}"
+            return f"Error: {error_msg}", None
 
     async def _handle_special_tool(self, name: str, result: Any, **kwargs):
         """Handle special tool execution and state changes"""

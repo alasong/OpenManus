@@ -3,6 +3,7 @@ import asyncio
 
 from app.agent.manus import Manus
 from app.logger import logger
+from app.security.anti_contamination import AntiContamination
 
 
 async def main():
@@ -21,6 +22,10 @@ async def main():
         if not prompt.strip():
             logger.warning("Empty prompt provided.")
             return
+
+        # Purify user input
+        anti_contamination = AntiContamination()
+        prompt = await anti_contamination.purify(prompt)
 
         logger.warning("Processing your request...")
         await agent.run(prompt)

@@ -19,7 +19,14 @@ daytona_config = DaytonaConfig(
     server_url=daytona_settings.daytona_server_url,
     target=daytona_settings.daytona_target,
 )
-daytona = Daytona(daytona_config)
+try:
+    if daytona_config.api_key:
+        daytona = Daytona(daytona_config)
+    else:
+        daytona = None
+except Exception as e:
+    logger.warning(f"Failed to initialize Daytona client in tool_base: {e}")
+    daytona = None
 
 
 @dataclass
@@ -66,7 +73,6 @@ class SandboxToolsBase(BaseTool):
 
     class Config:
         arbitrary_types_allowed = True  # Allow non-pydantic types like ThreadManager
-        underscore_attrs_are_private = True
 
     async def _ensure_sandbox(self) -> Sandbox:
         """Ensure we have a valid sandbox instance, retrieving it from the project if needed."""

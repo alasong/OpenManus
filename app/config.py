@@ -1,4 +1,6 @@
 import json
+import os
+import re
 import threading
 import tomllib
 from pathlib import Path
@@ -14,6 +16,28 @@ def get_project_root() -> Path:
 
 PROJECT_ROOT = get_project_root()
 WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
+
+_ENV_VAR_PATTERN = re.compile(r"^\$\{([A-Z0-9_]+)\}$")
+
+
+def _resolve_env_placeholders(value):
+    if isinstance(value, str):
+        if value.startswith("env:"):
+            env_key = value[4:]
+            return os.environ.get(env_key, value)
+        match = _ENV_VAR_PATTERN.match(value)
+        if match:
+            env_key = match.group(1)
+            return os.environ.get(env_key, value)
+        return value
+
+    if isinstance(value, dict):
+        return {k: _resolve_env_placeholders(v) for k, v in value.items()}
+
+    if isinstance(value, list):
+        return [_resolve_env_placeholders(v) for v in value]
+
+    return value
 
 
 class LLMSettings(BaseModel):
@@ -87,7 +111,7 @@ class BrowserSettings(BaseModel):
         None, description="Proxy settings for the browser"
     )
     max_content_length: int = Field(
-        2000, description="Maximum length for content retrieval operations"
+        40000, description="Maximum length for content retrieval operations"
     )
 
 
@@ -106,7 +130,7 @@ class SandboxSettings(BaseModel):
 
 
 class DaytonaSettings(BaseModel):
-    daytona_api_key: str
+    daytona_api_key: str = Field("", description="Daytona API key (required only when using Daytona sandbox)")
     daytona_server_url: Optional[str] = Field(
         "https://app.daytona.io/api", description=""
     )
@@ -228,7 +252,89 @@ class Config:
     def _load_config(self) -> dict:
         config_path = self._get_config_path()
         with config_path.open("rb") as f:
-            return tomllib.load(f)
+            raw = tomllib.load(f)
+        return _resolve_env_placeholders(raw)
+
+    def _auto_configure_llm(self, default_settings: dict) -> dict:
+        """Auto-configure LLM settings based on available environment variables"""
+        
+        api_key = default_settings.get("api_key")
+        model = default_settings.get("model")
+
+        # If model is explicitly set (and not auto), respect it.
+        if model and model != "auto":
+            return default_settings
+
+        dashscope_key = os.environ.get("DASHSCOPE_API_KEY")
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+        openai_key = os.environ.get("OPENAI_API_KEY")
+
+        # Helper to return config dict
+        def get_config(provider, key):
+            if provider == "dashscope":
+                return {
+                    "model": "qwen-max",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "api_key": key,
+                    "max_tokens": 8192,
+                    "temperature": 0.0,
+                    "api_type": "openai",
+                    "api_version": "",
+                    "max_input_tokens": None,
+                }
+            elif provider == "anthropic":
+                return {
+                    "model": "claude-3-5-sonnet-20241022",
+                    "base_url": "https://api.anthropic.com/v1/",
+                    "api_key": key,
+                    "max_tokens": 8192,
+                    "temperature": 0.0,
+                    "api_type": "openai",
+                    "api_version": "",
+                    "max_input_tokens": None,
+                }
+            elif provider == "openai":
+                return {
+                    "model": "gpt-4o",
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key": key,
+                    "max_tokens": 4096,
+                    "temperature": 0.0,
+                    "api_type": "openai",
+                    "api_version": "",
+                    "max_input_tokens": None,
+                }
+            return default_settings
+
+        # 1. If we have a resolved api_key, check if it matches a known env var
+        if api_key and not str(api_key).startswith("${") and not str(api_key).startswith("env:"):
+            if dashscope_key and api_key == dashscope_key:
+                return get_config("dashscope", dashscope_key)
+            if anthropic_key and api_key == anthropic_key:
+                return get_config("anthropic", anthropic_key)
+            if openai_key and api_key == openai_key:
+                return get_config("openai", openai_key)
+            
+            # If api_key is set but doesn't match known env vars, and model is "auto",
+            # we can't guess the model safely, so maybe just return default or try to guess?
+            # For now, if model is "auto" but key is unknown, we might fail or default.
+            # Let's assume if key is set, we respect it, but if model is auto, we default to something generic?
+            # Actually, if model is "auto", we should probably try to auto-detect from env vars ignoring the set key?
+            # No, if the user provided a key (e.g. in config.toml), we should use it.
+            if model == "auto":
+                 # Fallback if key is provided but model is auto: default to gpt-4o compatible?
+                 # Or just continue to check env vars and OVERRIDE the config key?
+                 pass
+
+        # 2. Priority check for environment variables (if key was not matched or model is auto)
+        if dashscope_key:
+            return get_config("dashscope", dashscope_key)
+        if anthropic_key:
+            return get_config("anthropic", anthropic_key)
+        if openai_key:
+            return get_config("openai", openai_key)
+            
+        return default_settings
 
     def _load_initial_config(self):
         raw_config = self._load_config()
@@ -247,6 +353,9 @@ class Config:
             "api_type": base_llm.get("api_type", ""),
             "api_version": base_llm.get("api_version", ""),
         }
+        
+        # Apply auto-configuration
+        default_settings = self._auto_configure_llm(default_settings)
 
         # handle browser config.
         browser_config = raw_config.get("browser", {})
