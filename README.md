@@ -19,3 +19,4 @@
 
 
 # 结果：亲测性能不错，结果初步比较满意。
+- workspace\ai_context_engineering_trends.md 测试生成结果。
